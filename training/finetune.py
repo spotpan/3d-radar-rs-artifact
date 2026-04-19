@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+"""
+Precipitation estimation fine-tuning script.
+"""
+
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+import numpy as np
+from datetime import datetime
+import argparse
+from typing import Dict
+
+from data.dataloader import FinetuneDataset
+from models.mae import MAE3D, MAE3DConfig
+from models.rain_decoder import PrecipitationDecoder, create_precipitation_decoder
+from models.losses import CombinedLoss
+from training.trainer import PrecipitationTrainer
+from configs.finetune_config import get_config, load_station_coords
+
+
+def load_pretrained_mae(checkpoint_path: str, config: dict) -> MAE3D:
+    """Load pretrained MAE model from checkpoint."""
+    print(f"Loading pretrained MAE from {checkpoint_path}")
+
+    # Create MAE config
+    mae_config = MAE3DConfig(
+        in_channels=6,
+        img_size=(700, 900),
+        patch_size=16,
+        encoder_dim=768,
+        encoder_depth=16,
+        encoder_num_heads=12,
+        decoder_dim=512,
+        decoder_depth=8,
+        decoder_num_heads=8,
+        mask_ratio=0.8,
+    )
+
+    # Create model
+    mae = MAE3D(mae_config)
+
+    # Load checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
+
+    # Handle DataParallel wrapper
+    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
+        # Remove 'module.' prefix
+        state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
+    else:
+        state_dict = checkpoint['model_state_dict']
+
+    mae.load_state_dict(state_dict)
+    print(f"Loaded MAE from epoch {checkpoint['epoch']}, val_loss={checkpoint['val_loss']:.4f}")
+
+    return mae
+
+
+def create_model(config: dict) -> PrecipitationDecoder:
+    """Create precipitation estimation model."""
+    model_config = config['model']
+
+    # Load pretrained MAE
+    mae = load_pretrained_mae(model_config['mae_checkpoint'], config)
+
+    # Create precipitation decoder
+    decoder = create_precipitation_decoder(
+        mae_encoder=mae,
+        num_frames=model_config['num_frames'],
+        temporal_dim=model_config['temporal_dim'],
+        temporal_depth=model_config['temporal_depth'],
+        temporal_num_heads=model_config['temporal_num_heads'],
+        decoder_channels=model_config['decoder_channels'],
+        use_skip_connections=model_config['use_skip_connections'],
+        final_activation_reg=model_config['final_activation_reg'],
+        final_activation_cls=model_config['final_activation_cls'],
+    )
+
+    # Print model information
+    total_params = sum(p.numel() for p in decoder.parameters())
+    trainable_params = sum(p.numel() for p in decoder.parameters() if p.requires_grad)
+    mae_trainable = sum(p.numel() for p in mae.parameters() if p.requires_grad)
+
+    print(f"\nModel created:")
+    print(f"  MAE encoder parameters: {sum(p.numel() for p in mae.parameters()):,}")
+    print(f"  MAE encoder trainable: {mae_trainable:,} (should be 0)")
+    print(f"  Decoder parameters: {total_params:,}")
+    print(f"  Decoder trainable: {trainable_params:,}")
+    print(f"  Total trainable parameters: {trainable_params:,}")
+
+    return decoder
+
+
+def create_data_loaders(config: dict):
+    """Create data loaders for fine-tuning."""
+    data_config = config['data']
+    train_config = config['train']
+
+    # Create dataset
+    dataset = FinetuneDataset(
+        data_paths=data_config['data_paths'],
+        radar_height_layers=data_config['radar_height_layers'],
+        spatial_size=data_config['spatial_size'],
+        target_minutes=data_config['target_minutes'],
+        history_frames=data_config['history_frames'],
+        frame_interval=data_config['frame_interval'],
+    )
+
+    # Split into train and validation
+    val_size = int(len(dataset) * train_config['val_split'])
+    train_size = len(dataset) - val_size
+
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(42)
+    )
+
+    # Create data loaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=data_config['batch_size'],
+        shuffle=True,
+        num_workers=data_config['num_workers'],
+        pin_memory=data_config['pin_memory'],
+        drop_last=True,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=train_config['val_batch_size'],
+        shuffle=False,
+        num_workers=data_config['num_workers'],
+        pin_memory=data_config['pin_memory'],
+        drop_last=False,
+    )
+
+    print(f"\nData loaded:")
+    print(f"  Total sequences: {len(dataset)}")
+    print(f"  Training sequences: {len(train_dataset)}")
+    print(f"  Validation sequences: {len(val_dataset)}")
+    print(f"  Batch size: {data_config['batch_size']}")
+    print(f"  Training steps per epoch: {len(train_loader)}")
+    print(f"  Sequence length: {data_config['history_frames']} frames")
+    print(f"  Frame interval: {data_config['frame_interval']} minutes")
+
+    return train_loader, val_loader, dataset
+
+
+def create_loss_fn(config: dict):
+    """Create loss function."""
+    loss_config = config['loss']
+    data_config = config['data']
+
+    # Load station coordinates if available
+    station_coords = load_station_coords(loss_config['station_coords_path'])
+
+    # Create loss function
+    loss_fn = CombinedLoss(
+        station_coords=station_coords,
+        img_size=data_config['spatial_size'],
+        quantile=loss_config['quantile'],
+        rain_threshold=loss_config['rain_threshold'],
+        lambda_global=loss_config['lambda_global'],
+        lambda_point=loss_config['lambda_point'],
+        lambda_cls=loss_config['lambda_cls'],
+    )
+
+    print(f"\nLoss function created:")
+    print(f"  Quantile: {loss_config['quantile']}")
+    print(f"  Rain threshold: {loss_config['rain_threshold']} mm/h")
+    print(f"  Loss weights: global={loss_config['lambda_global']}, "
+          f"point={loss_config['lambda_point']}, cls={loss_config['lambda_cls']}")
+    if station_coords is not None:
+        print(f"  Station coordinates: {station_coords.shape[0]} stations")
+    else:
+        print(f"  Station coordinates: not provided (point loss will be 0)")
+
+    return loss_fn
+
+
+def create_optimizer(model: nn.Module, config: dict, train_loader: DataLoader):
+    """Create optimizer and scheduler."""
+    train_config = config['train']
+
+    # Optimizer (AdamW) - only train decoder parameters
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = optim.AdamW(
+        trainable_params,
+        lr=train_config['learning_rate'],
+        weight_decay=train_config['weight_decay'],
+        betas=(0.9, 0.95),
+    )
+
+    # Learning rate scheduler
+    if train_config['scheduler'] == 'cosine':
+        # Cosine annealing with warmup
+        total_steps = train_config['num_epochs'] * (len(train_loader) // train_config['gradient_accumulation_steps'])
+        warmup_steps = train_config['warmup_epochs'] * (len(train_loader) // train_config['gradient_accumulation_steps'])
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return step / max(warmup_steps, 1)
+            progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+            return 0.5 * (1.0 + np.cos(np.pi * progress))
+
+        scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    else:
+        scheduler = None
+
+    return optimizer, scheduler
+
+
+class PrecipitationTrainerWithActivationChange(PrecipitationTrainer):
+    """Extended trainer that changes activation function during training."""
+
+    def __init__(self, softplus_start_epoch: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.softplus_start_epoch = softplus_start_epoch
+
+    def train_epoch(self, epoch: int) -> Dict[str, float]:
+        """Train for one epoch with activation function change."""
+        # Change activation function if we've reached the specified epoch
+        if epoch >= self.softplus_start_epoch:
+            self.model.set_final_activation('softplus')
+            if epoch == self.softplus_start_epoch:
+                self.logger.info(f"Changed regression activation to softplus at epoch {epoch+1}")
+
+        return super().train_epoch(epoch)
+
+
+def main(args):
+    """Main training function."""
+    # Load configuration
+    config = get_config()
+
+    # Override with command line arguments
+    if args.num_epochs:
+        config['train']['num_epochs'] = args.num_epochs
+    if args.batch_size:
+        config['data']['batch_size'] = args.batch_size
+    if args.learning_rate:
+        config['train']['learning_rate'] = args.learning_rate
+    if args.checkpoint_dir:
+        config['train']['checkpoint_dir'] = args.checkpoint_dir
+    if args.experiment_name:
+        config['train']['experiment_name'] = args.experiment_name
+    if args.mae_checkpoint:
+        config['model']['mae_checkpoint'] = args.mae_checkpoint
+
+    # Set device
+    device = torch.device(config['hardware']['device'])
+    if device.type == 'cuda':
+        print(f"Using GPU: {torch.cuda.get_device_name(device)}")
+        torch.cuda.set_device(config['hardware']['gpu_ids'][0])
+
+    # Create model
+    model = create_model(config)
+
+    # Multi-GPU training
+    if device.type == 'cuda' and len(config['hardware']['gpu_ids']) > 1:
+        print(f"Using {len(config['hardware']['gpu_ids'])} GPUs")
+        model = nn.DataParallel(model, device_ids=config['hardware']['gpu_ids'])
+
+    # Create data loaders
+    train_loader, val_loader, dataset = create_data_loaders(config)
+
+    # Create loss function
+    loss_fn = create_loss_fn(config)
+
+    # Create optimizer and scheduler
+    optimizer, scheduler = create_optimizer(model, config, train_loader)
+
+    # Create trainer
+    trainer = PrecipitationTrainerWithActivationChange(
+        softplus_start_epoch=config['train']['softplus_start_epoch'],
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        optimizer=optimizer,
+        loss_fn=loss_fn,
+        scheduler=scheduler,
+        device=device,
+        num_epochs=config['train']['num_epochs'],
+        gradient_accumulation_steps=config['train']['gradient_accumulation_steps'],
+        max_grad_norm=config['train']['max_grad_norm'],
+        use_amp=config['train']['use_amp'],
+        checkpoint_dir=config['train']['checkpoint_dir'],
+        log_dir=config['train']['log_dir'],
+        experiment_name=config['train']['experiment_name'],
+    )
+
+    # Load checkpoint if specified
+    if args.resume_from:
+        print(f"Resuming from checkpoint: {args.resume_from}")
+        trainer.load_checkpoint(args.resume_from)
+
+    # Start training
+    try:
+        trainer.train()
+    except KeyboardInterrupt:
+        print("\nTraining interrupted by user.")
+        # Save current state
+        trainer.save_checkpoint(
+            trainer.current_epoch,
+            trainer.best_val_loss,
+            is_best=False
+        )
+    finally:
+        # Close dataset
+        dataset.close()
+
+    print("Fine-tuning completed.")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Precipitation estimation fine-tuning")
+    parser.add_argument("--num-epochs", type=int, help="Number of training epochs")
+    parser.add_argument("--batch-size", type=int, help="Batch size")
+    parser.add_argument("--learning-rate", type=float, help="Learning rate")
+    parser.add_argument("--checkpoint-dir", type=str, help="Checkpoint directory")
+    parser.add_argument("--experiment-name", type=str, help="Experiment name")
+    parser.add_argument("--mae-checkpoint", type=str, help="Path to pretrained MAE checkpoint")
+    parser.add_argument("--resume-from", type=str, help="Path to checkpoint to resume from")
+
+    args = parser.parse_args()
+    main(args)
