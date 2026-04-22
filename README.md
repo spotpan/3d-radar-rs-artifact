@@ -96,6 +96,69 @@ python training/finetune.py \
 - 模型架构参数（Transformer层数、注意力头数、嵌入维度等）
 - 训练超参数（学习率、批次大小、损失权重等）
 
+### 4. 模型评估
+
+#### 4.1 完整评估（对比实验 + 消融实验）
+```bash
+# 运行完整的评估流程（生成对比实验和消融实验结果）
+python run_evaluation.py
+```
+
+评估工具位于 `evaluation/` 目录，包含：
+- `evaluate.py`: 主评估脚本，计算所有论文中的指标
+- `README.md`: 详细使用说明
+
+**主要功能**：
+1. **对比实验**: 比较3DMAEPP与其他模型（RandomForest, UNet, PVT, DPT, 3DQPE, OpenSTL）
+2. **消融实验**: 评估各组件贡献（移除3DMAE预训练、时序融合、分类头、站点损失）
+3. **指标计算**: ME, MAE, RMSE, CC, CSI-0.1/1.0/5.0/10.0
+4. **结果导出**: CSV, LaTeX, JSON格式
+
+**使用步骤**：
+1. 编辑 `run_evaluation.py`，填充以下函数：
+   - `load_your_model()`: 加载您的3DMAEPP模型
+   - `load_comparison_models()`: 加载对比模型
+   - `load_ablation_models()`: 加载消融模型
+   - `create_test_data_loader()`: 创建测试数据加载器
+2. 运行评估脚本
+3. 查看生成的表格和摘要
+
+**输出文件**：
+- `evaluation_results_*/`: 包含所有结果文件
+- `model_comparison_*.csv`: 对比实验结果表（对应论文表1）
+- `ablation_study_*.csv`: 消融实验结果表（对应论文表2）
+- `results_tables.tex`: LaTeX格式表格
+- `results_summary.txt`: 结果摘要
+
+#### 4.2 快速评估（只评估3DMAE模型）
+```bash
+# 只评估3DMAE模型，结果输出到txt文件
+python run_evaluation_3dmae.py
+```
+
+**主要功能**：
+1. **专一性**: 只评估3DMAE模型，不涉及对比模型或消融实验
+2. **简洁输出**: 结果以易读的txt格式输出
+3. **完整指标**: 包含所有论文中的评估指标
+4. **快速使用**: 只需填充2个函数即可使用
+
+**使用步骤**：
+1. 编辑 `run_evaluation_3dmae.py`，填充以下函数：
+   - `load_3dmae_model()`: 加载您的3DMAE模型
+   - `create_test_data_loader()`: 创建测试数据加载器
+2. （可选）如果需要自定义预测格式，实现 `custom_prediction_fn()`
+3. 运行评估脚本
+4. 查看生成的txt报告
+
+**输出文件**：
+- `evaluation_results_3dmae_*/`: 包含评估结果
+- `3dmae_evaluation_results.txt`: 格式化的文本报告（主要输出）
+- `3dmae_evaluation_results.json`: 原始JSON数据
+
+**选择建议**：
+- **完整评估**: 需要生成论文表格、对比多个模型、进行消融分析时使用 `run_evaluation.py`
+- **快速评估**: 只需评估单个3DMAE模型、快速查看性能指标时使用 `run_evaluation_3dmae.py`
+
 ## 项目结构
 ```
 3DMAE/
@@ -115,14 +178,22 @@ python training/finetune.py \
 ├── configs/               # 配置文件
 │   ├── pretrain_config.py
 │   └── finetune_config.py
+├── evaluation/            # 模型评估工具
+│   ├── evaluate.py       # 主评估脚本
+│   ├── __init__.py
+│   └── README.md         # 评估工具说明
 ├── scripts/               # 工具脚本
 │   ├── explore_data.py   # 数据探索
 │   └── check_metadata.py
+├── utils/                 # 工具函数
+│   └── metrics.py        # 评估指标计算
 ├── outputs/              # 输出目录
 ├── logs/                 # 训练日志
 ├── checkpoints/          # 模型检查点
 ├── test_integration.py   # 集成测试
 ├── test_dataloader.py    # 数据加载测试
+├── run_evaluation.py     # 完整评估流程脚本
+├── run_evaluation_3dmae.py # 3DMAE专用评估脚本
 ├── PROJECT_PLAN.md       # 项目计划文档
 └── README.md            # 本文档
 ```
@@ -197,6 +268,85 @@ python training/finetune.py \
 - 运行`test_integration.py`验证所有组件
 - 使用小批次和简化模型进行快速调试
 - 监控训练日志和TensorBoard可视化
+
+## 开始使用指南
+
+### 第一步：环境准备
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 检查数据
+python scripts/check_metadata.py
+
+# 3. 运行组件测试
+python test_integration.py
+```
+
+### 第二步：模型训练
+```bash
+# 1. 3DMAE预训练（使用默认配置）
+python training/pretrain.py
+
+# 2. 降水反演微调（需要预训练权重）
+python training/finetune.py --mae-checkpoint ./checkpoints/mae_pretrain/best_model.pt
+```
+
+### 第三步：模型评估
+
+#### 选项A：完整评估（对比实验 + 消融实验）
+1. **准备测试数据**: 确保测试集HDF5文件格式正确
+2. **编辑评估脚本**: 打开`run_evaluation.py`，填充四个关键函数：
+   - `load_your_model()`: 加载训练好的3DMAEPP模型
+   - `load_comparison_models()`: 加载对比模型（RandomForest, UNet等）
+   - `load_ablation_models()`: 加载消融实验模型变体
+   - `create_test_data_loader()`: 创建测试数据加载器
+3. **运行评估**:
+   ```bash
+   python run_evaluation.py
+   ```
+4. **查看结果**: 结果保存在`evaluation_results_*/`目录，包含：
+   - 对比实验结果表（CSV和LaTeX格式）
+   - 消融实验结果表
+   - 结果摘要报告
+
+#### 选项B：快速评估（只评估3DMAE模型）
+1. **准备测试数据**: 确保测试集HDF5文件格式正确
+2. **编辑评估脚本**: 打开`run_evaluation_3dmae.py`，填充两个关键函数：
+   - `load_3dmae_model()`: 加载训练好的3DMAE模型
+   - `create_test_data_loader()`: 创建测试数据加载器
+3. **运行评估**:
+   ```bash
+   python run_evaluation_3dmae.py
+   ```
+4. **查看结果**: 结果保存在`evaluation_results_3dmae_*/`目录，包含：
+   - `3dmae_evaluation_results.txt`: 格式化的文本报告
+   - `3dmae_evaluation_results.json`: 原始JSON数据
+
+**选择建议**：
+- **完整评估**: 需要生成论文表格、对比多个模型、进行消融分析
+- **快速评估**: 只需评估单个3DMAE模型、快速查看性能指标
+
+### 第四步：生成论文图表
+1. **使用LaTeX表格**: `evaluation_results_*/results_tables.tex`可直接插入论文
+2. **自定义可视化**: 基于CSV结果文件创建自定义图表
+3. **结果分析**: 参考`results_summary.txt`进行结果解读
+
+### 快速验证
+如果只想测试评估工具的基本功能，可以使用虚拟数据：
+```python
+# 在Python中快速测试评估指标计算
+from utils.metrics import calculate_all_metrics
+import torch
+
+# 创建虚拟数据
+pred = torch.randn(2, 1, 100, 100).abs()
+target = torch.randn(2, 1, 100, 100).abs()
+
+# 计算指标
+metrics = calculate_all_metrics(pred, target)
+print(metrics)
+```
 
 ## 参考文献
 - 本文基于"基于三维掩码自编码器的定量降水估计方法"论文实现

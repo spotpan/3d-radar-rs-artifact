@@ -89,7 +89,7 @@ def create_data_loaders(config: dict):
     return train_loader, val_loader, dataset
 
 
-def create_optimizer(model: nn.Module, config: dict):
+def create_optimizer(model: nn.Module, config: dict, train_loader: DataLoader):
     """Create optimizer and scheduler."""
     train_config = config['train']
 
@@ -155,7 +155,7 @@ def main(args):
     train_loader, val_loader, dataset = create_data_loaders(config)
 
     # Create optimizer and scheduler
-    optimizer, scheduler = create_optimizer(model, config)
+    optimizer, scheduler = create_optimizer(model, config, train_loader)
 
     # Create trainer
     trainer = MAETrainer(

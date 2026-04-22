@@ -28,8 +28,8 @@ class RadarRainDataset(Dataset):
         self.spatial_size = spatial_size
         self.use_valid_only = use_valid_only
 
-        # Store file handles
-        self.files = []
+        # Store file handles (initialized to None, will be opened on demand)
+        self.files = [None] * len(data_paths)
         # Store indices as (file_idx, sample_idx)
         self.indices = []
 
@@ -86,9 +86,9 @@ class RadarRainDataset(Dataset):
 
     def _get_file_handle(self, file_idx: int) -> h5py.File:
         """Get or create file handle."""
-        if len(self.files) <= file_idx:
-            # Open new file
-            self.files.append(h5py.File(self.data_paths[file_idx], 'r'))
+        if self.files[file_idx] is None:
+            # Open file if not already opened
+            self.files[file_idx] = h5py.File(self.data_paths[file_idx], 'r')
         return self.files[file_idx]
 
     def __len__(self) -> int:
@@ -120,9 +120,10 @@ class RadarRainDataset(Dataset):
 
     def close(self):
         """Close all open file handles."""
-        for f in self.files:
-            f.close()
-        self.files = []
+        for i, f in enumerate(self.files):
+            if f is not None:
+                f.close()
+                self.files[i] = None
 
     def __del__(self):
         self.close()

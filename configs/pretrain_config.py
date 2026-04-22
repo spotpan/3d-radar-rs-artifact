@@ -4,13 +4,13 @@ from datetime import datetime
 # Data configuration
 DATA_CONFIG = {
     'data_paths': [
-        '/mnt/md1/hxc/guangdong/train_select/time_radar_rain_2022.h5',
-        '/mnt/md1/hxc/guangdong/train_select/time_radar_rain_2023.h5',
+        # '/mnt/md1/hxc/guangdong/train_select/time_radar_rain_2022.h5',
+        # '/mnt/md1/hxc/guangdong/train_select/time_radar_rain_2023.h5',
         '/mnt/md1/hxc/guangdong/train_select/time_radar_rain_2025.h5',
     ],
     'radar_height_layers': [0, 1, 2, 3, 4, 5],  # First 6 layers
     'spatial_size': (700, 900),
-    'batch_size': 64,  # From paper
+    'batch_size': 4,  # From paper
     'num_workers': 4,
     'pin_memory': True,
     'shuffle': True,
