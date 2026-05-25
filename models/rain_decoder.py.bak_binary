@@ -27,8 +27,7 @@ class RainDecoderConfig:
 
         # Decoder
         decoder_channels: List[int] = [512, 256, 128, 64, 32],
-        output_channels: int = 1,  # For regression and binary classification
-        num_rain_classes: int = 5,  # For multi-class precipitation classification
+        output_channels: int = 1,  # For regression
         use_skip_connections: bool = True,
 
         # Activation
@@ -51,7 +50,6 @@ class RainDecoderConfig:
         # Decoder
         self.decoder_channels = decoder_channels
         self.output_channels = output_channels
-        self.num_rain_classes = num_rain_classes
         self.use_skip_connections = use_skip_connections
 
         # Activation
@@ -245,17 +243,10 @@ class PrecipitationDecoder(nn.Module):
             kernel_size=1
         )
 
-        # Binary classification head (rain probability)
+        # Classification head (rain probability)
         self.cls_head = nn.Conv2d(
             config.decoder_channels[-1],
             config.output_channels,
-            kernel_size=1
-        )
-
-        # Multi-class classification head (precipitation level logits)
-        self.multi_cls_head = nn.Conv2d(
-            config.decoder_channels[-1],
-            config.num_rain_classes,
             kernel_size=1
         )
 
@@ -351,7 +342,6 @@ class PrecipitationDecoder(nn.Module):
         # Apply heads
         reg_output = self.reg_head(x)
         cls_output = self.cls_head(x)
-        multi_cls_logits = self.multi_cls_head(x)
 
         # Apply final activations
         if self.config.final_activation_reg == 'softplus':
@@ -381,17 +371,10 @@ class PrecipitationDecoder(nn.Module):
                 mode='bilinear',
                 align_corners=False
             )
-            multi_cls_logits = F.interpolate(
-                multi_cls_logits,
-                size=(target_h, target_w),
-                mode='bilinear',
-                align_corners=False
-            )
 
         return {
-            'reg_output': reg_output,              # (B, 1, H, W)
-            'cls_output': cls_output,              # (B, 1, H, W)
-            'multi_cls_logits': multi_cls_logits,  # (B, 5, H, W)
+            'reg_output': reg_output,  # (B, 1, H, W)
+            'cls_output': cls_output,  # (B, 1, H, W)
         }
 
     def set_final_activation(self, activation: str):
@@ -404,13 +387,8 @@ def create_precipitation_decoder(
     num_frames: int = 6,
     **kwargs
 ) -> PrecipitationDecoder:
-    """Create precipitation decoder with default parameters.
-
-    Any default parameter can be overridden by kwargs.
-    For example:
-        create_precipitation_decoder(mae, num_patches=(44, 57))
-    """
-    default_kwargs = dict(
+    """Create precipitation decoder with default parameters."""
+    config = RainDecoderConfig(
         encoder_dim=768,
         num_patches=(43, 56),
         patch_size=16,
@@ -420,14 +398,11 @@ def create_precipitation_decoder(
         temporal_num_heads=8,
         decoder_channels=[512, 256, 128, 64, 32],
         output_channels=1,
-        num_rain_classes=5,
         use_skip_connections=True,
         final_activation_reg='linear',
         final_activation_cls='sigmoid',
+        **kwargs
     )
-
-    default_kwargs.update(kwargs)
-    config = RainDecoderConfig(**default_kwargs)
 
     return PrecipitationDecoder(config, mae_encoder)
 

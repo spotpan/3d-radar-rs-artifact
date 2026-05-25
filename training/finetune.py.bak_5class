@@ -47,7 +47,7 @@ def load_pretrained_mae(checkpoint_path: str, config: dict) -> MAE3D:
     mae = MAE3D(mae_config)
 
     # Load checkpoint
-    checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
 
     # Handle DataParallel wrapper
     if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:

@@ -1,22 +1,22 @@
 import torch
 from datetime import datetime
 
-# Data configuration
+# Data configuration - Guangdong radar data
 DATA_CONFIG = {
     'data_paths': [
         '/path/to/radar_station_dataset/time_radar_rain_2022.h5',
         '/path/to/radar_station_dataset/time_radar_rain_2023.h5',
-        '/path/to/radar_station_dataset/time_radar_rain_2024.h5',
+        '/path/to/radar_station_dataset/time_radar_rain_2025.h5',
     ],
-    'radar_height_layers': [0, 1, 2, 3, 4, 5],  # First 6 layers
+    'radar_height_layers': [0, 1, 2, 3, 4, 5],  # First 6 CAPPI layers
     'spatial_size': (700, 900),
-    'batch_size': 4,  # From paper
-    'num_workers': 4,
+    'batch_size': 8,          # 2 GPUs * batch 4 each = effective 8
+    'num_workers': 8,         # 4 per GPU
     'pin_memory': True,
     'shuffle': True,
 }
 
-# Model configuration
+# Model configuration (ViT-Large scale, same as original paper)
 MODEL_CONFIG = {
     'in_channels': 6,
     'img_size': (700, 900),
@@ -45,16 +45,16 @@ TRAIN_CONFIG = {
     'min_lr': 1e-6,
 
     # Checkpoint and logging
-    'checkpoint_dir': './checkpoints/mae_pretrain',
-    'log_dir': './logs/mae_pretrain',
-    'experiment_name': f'mae_pretrain_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+    'checkpoint_dir': './checkpoints/mae_pretrain_guangdong',
+    'log_dir': './logs/mae_pretrain_guangdong',
+    'experiment_name': f'mae_pretrain_guangdong_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
 
     # Validation
     'val_split': 0.1,
     'val_batch_size': 32,
 }
 
-# Hardware
+# Hardware configuration
 HARDWARE_CONFIG = {
     'device': 'cuda' if torch.cuda.is_available() else 'cpu',
     'gpu_ids': [0, 1] if torch.cuda.device_count() > 1 else [0],

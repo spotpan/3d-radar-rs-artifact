@@ -1,4 +1,43 @@
-checkpoints/
+# Python
 __pycache__/
-logs/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
 
+# Environments
+.env
+.venv
+env/
+venv/
+*.tar.gz
+
+# Data
+data_raw/
+data_processed/
+*.h5
+*.hdf5
+*.nc
+*.npz
+*.npy
+*.csv
+
+# Outputs
+checkpoints/
+logs/
+results/
+evaluation_results/
+figures/
+outputs/
+runs/
+wandb/
+
+# Models
+*.pt
+*.pth
+*.ckpt
+
+# System/editor
+.DS_Store
+*.swp
+.vscode/

@@ -1,35 +1,38 @@
 #!/usr/bin/env python3
 """
-Precipitation estimation fine-tuning script.
+Precipitation estimation fine-tuning for Guangdong radar data.
+Uses 6 frames x 12-min intervals (1 hour radar history).
+Data valid rain only at minutes 00 and 30; radar data available at 6-min
+resolution for all timesteps via FinetuneDatasetGuangdong.
+Data: /path/to/radar_station_dataset/
 """
-
 import sys
 import os
-import math
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, WeightedRandomSampler
 import numpy as np
 from datetime import datetime
 import argparse
-from typing import Dict
+from typing import Dict, Tuple
 
-from data.dataloader import FinetuneDataset
+from data.dataloader import FinetuneDatasetGuangdong
 from models.mae import MAE3D, MAE3DConfig
-from models.rain_decoder import PrecipitationDecoder, create_precipitation_decoder
+from models.rain_decoder import (
+    PrecipitationDecoder, RainDecoderConfig,
+)
 from models.losses import CombinedLoss
 from training.trainer import PrecipitationTrainer
-from configs.finetune_config import get_config, load_station_coords
+from configs.finetune_guangdong_config import get_config, load_station_coords
 
 
 def load_pretrained_mae(checkpoint_path: str, config: dict) -> MAE3D:
     """Load pretrained MAE model from checkpoint."""
     print(f"Loading pretrained MAE from {checkpoint_path}")
 
-    # Create MAE config
     mae_config = MAE3DConfig(
         in_channels=6,
         img_size=(700, 900),
@@ -43,66 +46,60 @@ def load_pretrained_mae(checkpoint_path: str, config: dict) -> MAE3D:
         mask_ratio=0.8,
     )
 
-    # Create model
     mae = MAE3D(mae_config)
 
-    # Load checkpoint
     checkpoint = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
 
-    # Handle DataParallel wrapper
-    if 'module.' in list(checkpoint['model_state_dict'].keys())[0]:
-        # Remove 'module.' prefix
-        state_dict = {k.replace('module.', ''): v for k, v in checkpoint['model_state_dict'].items()}
-    else:
-        state_dict = checkpoint['model_state_dict']
+    # Handle DataParallel wrapper prefix
+    state_dict = checkpoint['model_state_dict']
+    if 'module.' in list(state_dict.keys())[0]:
+        state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
 
     mae.load_state_dict(state_dict)
-    print(f"Loaded MAE from epoch {checkpoint['epoch']}, val_loss={checkpoint['val_loss']:.4f}")
+    print(f"  Loaded MAE from epoch {checkpoint.get('epoch', '?')}, "
+          f"val_loss={checkpoint.get('val_loss', '?'):.4f}")
 
     return mae
 
 
 def create_model(config: dict) -> PrecipitationDecoder:
-    """Create precipitation estimation model."""
+    """Create precipitation estimation model with correct num_patches."""
     model_config = config['model']
 
-    # Load pretrained MAE
+    # Load pretrained MAE encoder
     mae = load_pretrained_mae(model_config['mae_checkpoint'], config)
 
-    # Compute patch grid. For (700, 900) with patch_size=16, this is (44, 57).
-    img_h, img_w = config.get('data', {}).get('spatial_size', (700, 900))
-    patch_size = model_config.get('patch_size', 16)
-    num_patches = (
-        model_config.get('num_patches_h', math.ceil(img_h / patch_size)),
-        model_config.get('num_patches_w', math.ceil(img_w / patch_size)),
-    )
-
-    # Create precipitation decoder
-    decoder = create_precipitation_decoder(
-        mae_encoder=mae,
+    # Build decoder config with correct patch dimensions for (700, 900)
+    decoder_config = RainDecoderConfig(
+        encoder_dim=768,
+        num_patches=(model_config['num_patches_h'],
+                     model_config['num_patches_w']),
+        patch_size=16,
         num_frames=model_config['num_frames'],
-        num_patches=num_patches,
-        patch_size=patch_size,
         temporal_dim=model_config['temporal_dim'],
         temporal_depth=model_config['temporal_depth'],
         temporal_num_heads=model_config['temporal_num_heads'],
         decoder_channels=model_config['decoder_channels'],
+        output_channels=1,
         use_skip_connections=model_config['use_skip_connections'],
         final_activation_reg=model_config['final_activation_reg'],
         final_activation_cls=model_config['final_activation_cls'],
     )
 
-    # Print model information
+    decoder = PrecipitationDecoder(decoder_config, mae_encoder=mae)
+
     total_params = sum(p.numel() for p in decoder.parameters())
     trainable_params = sum(p.numel() for p in decoder.parameters() if p.requires_grad)
+    mae_params = sum(p.numel() for p in mae.parameters())
     mae_trainable = sum(p.numel() for p in mae.parameters() if p.requires_grad)
 
     print(f"\nModel created:")
-    print(f"  MAE encoder parameters: {sum(p.numel() for p in mae.parameters()):,}")
+    print(f"  MAE encoder parameters: {mae_params:,}")
     print(f"  MAE encoder trainable: {mae_trainable:,} (should be 0)")
     print(f"  Decoder parameters: {total_params:,}")
     print(f"  Decoder trainable: {trainable_params:,}")
-    print(f"  Total trainable parameters: {trainable_params:,}")
+    print(f"  Total trainable: {trainable_params:,}")
+    print(f"  Sequence: {model_config['num_frames']} frames x 30-min intervals")
 
     return decoder
 
@@ -112,8 +109,7 @@ def create_data_loaders(config: dict):
     data_config = config['data']
     train_config = config['train']
 
-    # Create dataset
-    dataset = FinetuneDataset(
+    dataset = FinetuneDatasetGuangdong(
         data_paths=data_config['data_paths'],
         radar_height_layers=data_config['radar_height_layers'],
         spatial_size=data_config['spatial_size'],
@@ -122,7 +118,6 @@ def create_data_loaders(config: dict):
         frame_interval=data_config['frame_interval'],
     )
 
-    # Split into train and validation
     val_size = int(len(dataset) * train_config['val_split'])
     train_size = len(dataset) - val_size
 
@@ -132,11 +127,58 @@ def create_data_loaders(config: dict):
         generator=torch.Generator().manual_seed(42)
     )
 
-    # Create data loaders
+    use_weighted_sampler = train_config.get('use_weighted_sampler', False)
+
+    if use_weighted_sampler:
+        cache_path = train_config.get('sampler_cache_path', None)
+        cache_refresh = train_config.get('sampler_cache_refresh', False)
+
+        if cache_path is not None:
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+
+        if cache_path is not None and os.path.exists(cache_path) and not cache_refresh:
+            print(f"\nLoading sample weights from cache: {cache_path}")
+            dataset.sample_weights = np.load(cache_path).astype(np.float32)
+
+            if len(dataset.sample_weights) != len(dataset):
+                raise ValueError(
+                    f"Cached sample weights length {len(dataset.sample_weights)} "
+                    f"!= dataset length {len(dataset)}. Set sampler_cache_refresh=True."
+                )
+        else:
+            dataset.compute_sample_weights(
+                thresholds=tuple(train_config.get('sampler_thresholds', [0.1, 1.0, 3.5, 7.5])),
+                area_rules=train_config.get('sampler_area_rules', None),
+                max_weight=train_config.get('sampler_max_weight', 4.0),
+                verbose=True,
+            )
+
+            if cache_path is not None:
+                np.save(cache_path, dataset.sample_weights)
+                print(f"Saved sample weights cache to: {cache_path}")
+
+        train_indices = np.asarray(train_dataset.indices, dtype=np.int64)
+        train_weights = dataset.sample_weights[train_indices]
+
+        sampler = WeightedRandomSampler(
+            weights=torch.as_tensor(train_weights, dtype=torch.double),
+            num_samples=len(train_weights),
+            replacement=True,
+        )
+
+        print("\nWeighted sampler enabled:")
+        print(f"  train weights min/max/mean: "
+              f"{train_weights.min():.4f}/"
+              f"{train_weights.max():.4f}/"
+              f"{train_weights.mean():.4f}")
+    else:
+        sampler = None
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=data_config['batch_size'],
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=data_config['num_workers'],
         pin_memory=data_config['pin_memory'],
         drop_last=True,
@@ -156,9 +198,9 @@ def create_data_loaders(config: dict):
     print(f"  Training sequences: {len(train_dataset)}")
     print(f"  Validation sequences: {len(val_dataset)}")
     print(f"  Batch size: {data_config['batch_size']}")
-    print(f"  Training steps per epoch: {len(train_loader)}")
-    print(f"  Sequence length: {data_config['history_frames']} frames")
-    print(f"  Frame interval: {data_config['frame_interval']} minutes")
+    print(f"  Steps per epoch: {len(train_loader)}")
+    print(f"  Sequence: {data_config['history_frames']} frames @ "
+          f"{data_config['frame_interval']}-min intervals")
 
     return train_loader, val_loader, dataset
 
@@ -168,10 +210,8 @@ def create_loss_fn(config: dict):
     loss_config = config['loss']
     data_config = config['data']
 
-    # Load station coordinates if available
     station_coords = load_station_coords(loss_config['station_coords_path'])
 
-    # Create loss function
     loss_fn = CombinedLoss(
         station_coords=station_coords,
         img_size=data_config['spatial_size'],
@@ -180,26 +220,30 @@ def create_loss_fn(config: dict):
         lambda_global=loss_config['lambda_global'],
         lambda_point=loss_config['lambda_point'],
         lambda_cls=loss_config['lambda_cls'],
+        lambda_multi_cls=loss_config.get('lambda_multi_cls', 0.3),
+        rain_class_thresholds=loss_config.get('rain_class_thresholds', None),
+        multi_cls_weights=loss_config.get('multi_cls_weights', None),
     )
 
     print(f"\nLoss function created:")
     print(f"  Quantile: {loss_config['quantile']}")
     print(f"  Rain threshold: {loss_config['rain_threshold']} mm/h")
-    print(f"  Loss weights: global={loss_config['lambda_global']}, "
-          f"point={loss_config['lambda_point']}, cls={loss_config['lambda_cls']}")
+    print(f"  Weights: global={loss_config['lambda_global']}, "
+          f"point={loss_config['lambda_point']}, "
+          f"cls={loss_config['lambda_cls']}, "
+          f"multi_cls={loss_config.get('lambda_multi_cls', 0.3)}")
     if station_coords is not None:
-        print(f"  Station coordinates: {station_coords.shape[0]} stations")
+        print(f"  Stations: {station_coords.shape[0]}")
     else:
-        print(f"  Station coordinates: not provided (point loss will be 0)")
+        print(f"  Stations: not available (point loss = 0)")
 
     return loss_fn
 
 
-def create_optimizer(model: nn.Module, config: dict, train_loader: DataLoader):
+def create_optimizer(model: nn.Module, config: dict, train_loader):
     """Create optimizer and scheduler."""
     train_config = config['train']
 
-    # Optimizer (AdamW) - only train decoder parameters
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     optimizer = optim.AdamW(
         trainable_params,
@@ -208,11 +252,9 @@ def create_optimizer(model: nn.Module, config: dict, train_loader: DataLoader):
         betas=(0.9, 0.95),
     )
 
-    # Learning rate scheduler
     if train_config['scheduler'] == 'cosine':
-        # Cosine annealing with warmup
-        total_steps = train_config['num_epochs'] * (len(train_loader) // train_config['gradient_accumulation_steps'])
-        warmup_steps = train_config['warmup_epochs'] * (len(train_loader) // train_config['gradient_accumulation_steps'])
+        total_steps = train_config['num_epochs'] * len(train_loader)
+        warmup_steps = train_config['warmup_epochs'] * len(train_loader)
 
         def lr_lambda(step):
             if step < warmup_steps:
@@ -228,26 +270,24 @@ def create_optimizer(model: nn.Module, config: dict, train_loader: DataLoader):
 
 
 class PrecipitationTrainerWithActivationChange(PrecipitationTrainer):
-    """Extended trainer that changes activation function during training."""
+    """Trainer that switches regression activation to softplus mid-training."""
 
     def __init__(self, softplus_start_epoch: int, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.softplus_start_epoch = softplus_start_epoch
 
     def train_epoch(self, epoch: int) -> Dict[str, float]:
-        """Train for one epoch with activation function change."""
-        # Change activation function if we've reached the specified epoch
         if epoch >= self.softplus_start_epoch:
             self.model.set_final_activation('softplus')
             if epoch == self.softplus_start_epoch:
-                self.logger.info(f"Changed regression activation to softplus at epoch {epoch+1}")
-
+                self.logger.info(
+                    f"Switched regression activation to softplus at epoch {epoch+1}"
+                )
         return super().train_epoch(epoch)
 
 
 def main(args):
     """Main training function."""
-    # Load configuration
     config = get_config()
 
     # Override with command line arguments
@@ -263,6 +303,10 @@ def main(args):
         config['train']['experiment_name'] = args.experiment_name
     if args.mae_checkpoint:
         config['model']['mae_checkpoint'] = args.mae_checkpoint
+    if args.max_train_steps is not None:
+        config['train']['max_train_steps'] = args.max_train_steps
+    if args.max_val_steps is not None:
+        config['train']['max_val_steps'] = args.max_val_steps
 
     # Set device
     device = torch.device(config['hardware']['device'])
@@ -273,21 +317,22 @@ def main(args):
     # Create model
     model = create_model(config)
 
-    # Multi-GPU training
+    # Multi-GPU
     if device.type == 'cuda' and len(config['hardware']['gpu_ids']) > 1:
-        print(f"Using {len(config['hardware']['gpu_ids'])} GPUs")
+        print(f"Using {len(config['hardware']['gpu_ids'])} GPUs: "
+              f"{config['hardware']['gpu_ids']}")
         model = nn.DataParallel(model, device_ids=config['hardware']['gpu_ids'])
 
-    # Create data loaders
+    # Data loaders
     train_loader, val_loader, dataset = create_data_loaders(config)
 
-    # Create loss function
+    # Loss function
     loss_fn = create_loss_fn(config)
 
-    # Create optimizer and scheduler
+    # Optimizer and scheduler
     optimizer, scheduler = create_optimizer(model, config, train_loader)
 
-    # Create trainer
+    # Trainer
     trainer = PrecipitationTrainerWithActivationChange(
         softplus_start_epoch=config['train']['softplus_start_epoch'],
         model=model,
@@ -300,44 +345,49 @@ def main(args):
         num_epochs=config['train']['num_epochs'],
         gradient_accumulation_steps=config['train']['gradient_accumulation_steps'],
         max_grad_norm=config['train']['max_grad_norm'],
+        max_train_steps=config['train'].get('max_train_steps', None),
+        max_val_steps=config['train'].get('max_val_steps', None),
         use_amp=config['train']['use_amp'],
         checkpoint_dir=config['train']['checkpoint_dir'],
         log_dir=config['train']['log_dir'],
         experiment_name=config['train']['experiment_name'],
     )
 
-    # Load checkpoint if specified
     if args.resume_from:
         print(f"Resuming from checkpoint: {args.resume_from}")
         trainer.load_checkpoint(args.resume_from)
 
-    # Start training
     try:
         trainer.train()
     except KeyboardInterrupt:
-        print("\nTraining interrupted by user.")
-        # Save current state
+        print("\nTraining interrupted. Saving checkpoint...")
         trainer.save_checkpoint(
             trainer.current_epoch,
             trainer.best_val_loss,
             is_best=False
         )
     finally:
-        # Close dataset
         dataset.close()
 
     print("Fine-tuning completed.")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Precipitation estimation fine-tuning")
+    parser = argparse.ArgumentParser(
+        description="Precipitation fine-tuning for Guangdong radar data"
+    )
     parser.add_argument("--num-epochs", type=int, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, help="Batch size")
     parser.add_argument("--learning-rate", type=float, help="Learning rate")
     parser.add_argument("--checkpoint-dir", type=str, help="Checkpoint directory")
     parser.add_argument("--experiment-name", type=str, help="Experiment name")
-    parser.add_argument("--mae-checkpoint", type=str, help="Path to pretrained MAE checkpoint")
-    parser.add_argument("--resume-from", type=str, help="Path to checkpoint to resume from")
-
+    parser.add_argument("--mae-checkpoint", type=str,
+                        help="Path to pretrained MAE checkpoint")
+    parser.add_argument("--resume-from", type=str,
+                        help="Path to checkpoint to resume from")
+    parser.add_argument("--max-train-steps", type=int,
+                        help="Maximum number of training batches per epoch for debugging/smoke tests")
+    parser.add_argument("--max-val-steps", type=int,
+                        help="Maximum number of validation batches per epoch for debugging/smoke tests")
     args = parser.parse_args()
     main(args)

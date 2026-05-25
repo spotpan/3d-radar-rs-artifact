@@ -219,64 +219,6 @@ class ClassificationLoss(nn.Module):
         return loss
 
 
-
-class MultiClassRainLoss(nn.Module):
-    """Multi-class classification loss for precipitation levels."""
-
-    def __init__(self, thresholds=None, class_weights=None, ignore_index: int = -100):
-        super().__init__()
-
-        # 5 classes:
-        # 0: < 0.1
-        # 1: [0.1, 2.5)
-        # 2: [2.5, 8.0)
-        # 3: [8.0, 16.0)
-        # 4: >= 16.0
-        if thresholds is None:
-            thresholds = [0.1, 2.5, 8.0, 16.0]
-
-        self.thresholds = thresholds
-        self.class_weights = class_weights
-        self.ignore_index = ignore_index
-
-    def make_targets(self, target_grid: torch.Tensor) -> torch.Tensor:
-        target = target_grid.squeeze(1)  # (B, H, W)
-
-        boundaries = torch.tensor(
-            self.thresholds,
-            device=target.device,
-            dtype=target.dtype,
-        )
-
-        target_cls = torch.bucketize(target, boundaries)
-
-        nan_mask = torch.isnan(target)
-        target_cls[nan_mask] = self.ignore_index
-
-        return target_cls.long()
-
-    def forward(
-        self,
-        pred_logits: torch.Tensor,  # (B, 5, H, W)
-        target_grid: torch.Tensor,  # (B, 1, H, W)
-    ) -> torch.Tensor:
-        target_cls = self.make_targets(target_grid)
-
-        weight = None
-        if self.class_weights is not None:
-            weight = torch.tensor(
-                self.class_weights,
-                device=pred_logits.device,
-                dtype=torch.float32,
-            )
-
-        ce_loss = nn.CrossEntropyLoss(
-            weight=weight,
-            ignore_index=self.ignore_index,
-        )
-        return ce_loss(pred_logits.float(), target_cls)
-
-
 class CombinedLoss(nn.Module):
     """Combined loss for precipitation estimation.
 
@@ -292,15 +234,11 @@ class CombinedLoss(nn.Module):
         lambda_global: float = 1.0,
         lambda_point: float = 0.5,
         lambda_cls: float = 0.3,
-        lambda_multi_cls: float = 0.3,
-        rain_class_thresholds: Optional[List[float]] = None,
-        multi_cls_weights: Optional[List[float]] = None,
     ):
         super().__init__()
         self.lambda_global = lambda_global
         self.lambda_point = lambda_point
         self.lambda_cls = lambda_cls
-        self.lambda_multi_cls = lambda_multi_cls
 
         # Global regression loss (quantile loss on grid)
         self.global_loss = QuantileLoss(quantile)
@@ -315,14 +253,8 @@ class CombinedLoss(nn.Module):
         else:
             self.point_loss = None
 
-        # Binary classification loss
+        # Classification loss
         self.cls_loss = ClassificationLoss(threshold=rain_threshold)
-
-        # Multi-class classification loss
-        self.multi_cls_loss = MultiClassRainLoss(
-            thresholds=rain_class_thresholds,
-            class_weights=multi_cls_weights,
-        )
 
     def forward(
         self,
@@ -330,7 +262,6 @@ class CombinedLoss(nn.Module):
         pred_cls: torch.Tensor,  # (B, 1, H, W) classification probabilities
         target_grid: torch.Tensor,  # (B, 1, H, W) grid targets
         station_obs: Optional[torch.Tensor] = None,  # (B, S) station observations
-        pred_multi_cls: Optional[torch.Tensor] = None,  # (B, 5, H, W)
     ) -> Dict[str, torch.Tensor]:
         """
         Compute combined loss.
@@ -355,21 +286,14 @@ class CombinedLoss(nn.Module):
         else:
             losses['loss_point'] = torch.tensor(0.0, device=pred_reg.device)
 
-        # Binary classification loss
+        # Classification loss
         losses['loss_cls'] = self.cls_loss(pred_cls, target_grid)
-
-        # Multi-class classification loss
-        if pred_multi_cls is not None:
-            losses['loss_multi_cls'] = self.multi_cls_loss(pred_multi_cls, target_grid)
-        else:
-            losses['loss_multi_cls'] = torch.tensor(0.0, device=pred_reg.device)
 
         # Weighted total
         losses['loss_total'] = (
             self.lambda_global * losses['loss_global'] +
             self.lambda_point * losses['loss_point'] +
-            self.lambda_cls * losses['loss_cls'] +
-            self.lambda_multi_cls * losses['loss_multi_cls']
+            self.lambda_cls * losses['loss_cls']
         )
 
         return losses

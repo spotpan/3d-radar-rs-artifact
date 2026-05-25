@@ -26,8 +26,6 @@ class Trainer:
         num_epochs: int = 100,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
-        max_train_steps: Optional[int] = None,
-        max_val_steps: Optional[int] = None,
         use_amp: bool = True,
         checkpoint_dir: str = './checkpoints',
         log_dir: str = './logs',
@@ -42,8 +40,6 @@ class Trainer:
         self.num_epochs = num_epochs
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.max_grad_norm = max_grad_norm
-        self.max_train_steps = max_train_steps
-        self.max_val_steps = max_val_steps
         self.use_amp = use_amp
         self.experiment_name = experiment_name
 
@@ -92,16 +88,11 @@ class Trainer:
         self.model.train()
         epoch_loss = 0.0
         num_batches = len(self.train_loader)
-        if self.max_train_steps is not None:
-            num_batches = min(num_batches, self.max_train_steps)
 
-        progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.num_epochs}', total=num_batches)
+        progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch+1}/{self.num_epochs}')
         self.optimizer.zero_grad()
 
         for batch_idx, batch in enumerate(progress_bar):
-            if self.max_train_steps is not None and batch_idx >= self.max_train_steps:
-                break
-
             # Move batch to device
             batch = self._move_to_device(batch)
 
@@ -153,18 +144,8 @@ class Trainer:
             epoch_loss += loss.item() * self.gradient_accumulation_steps
             avg_loss = epoch_loss / (batch_idx + 1)
 
-            loss_cls_val = loss_dict.get('loss_cls', 0.0)
-            loss_multi_cls_val = loss_dict.get('loss_multi_cls', 0.0)
-
-            if hasattr(loss_cls_val, 'item'):
-                loss_cls_val = loss_cls_val.item()
-            if hasattr(loss_multi_cls_val, 'item'):
-                loss_multi_cls_val = loss_multi_cls_val.item()
-
             progress_bar.set_postfix({
                 'loss': f'{avg_loss:.4f}',
-                'loss_cls': f'{loss_cls_val:.4f}',
-                'loss_multi_cls': f'{loss_multi_cls_val:.4f}',
                 'lr': f'{self.optimizer.param_groups[0]["lr"]:.2e}'
             })
 
@@ -176,15 +157,10 @@ class Trainer:
         self.model.eval()
         val_loss = 0.0
         num_batches = len(self.val_loader)
-        if self.max_val_steps is not None:
-            num_batches = min(num_batches, self.max_val_steps)
 
-        progress_bar = tqdm(self.val_loader, desc='Validation', total=num_batches)
+        progress_bar = tqdm(self.val_loader, desc='Validation')
 
-        for batch_idx, batch in enumerate(progress_bar):
-            if self.max_val_steps is not None and batch_idx >= self.max_val_steps:
-                break
-
+        for batch in progress_bar:
             # Move batch to device
             batch = self._move_to_device(batch)
 
@@ -195,7 +171,7 @@ class Trainer:
             val_loss += loss.item()
 
             # Update progress bar
-            avg_loss = val_loss / (batch_idx + 1)
+            avg_loss = val_loss / len(progress_bar)
             progress_bar.set_postfix({'val_loss': f'{avg_loss:.4f}'})
 
         metrics = {'val_loss': val_loss / num_batches}
@@ -369,8 +345,6 @@ class PrecipitationTrainer(Trainer):
         num_epochs: int = 100,
         gradient_accumulation_steps: int = 1,
         max_grad_norm: float = 1.0,
-        max_train_steps: Optional[int] = None,
-        max_val_steps: Optional[int] = None,
         use_amp: bool = True,
         checkpoint_dir: str = './checkpoints',
         log_dir: str = './logs',
@@ -379,7 +353,7 @@ class PrecipitationTrainer(Trainer):
         super().__init__(
             model, train_loader, val_loader, optimizer, scheduler,
             device, num_epochs, gradient_accumulation_steps, max_grad_norm,
-            max_train_steps, max_val_steps, use_amp, checkpoint_dir, log_dir, experiment_name
+            use_amp, checkpoint_dir, log_dir, experiment_name
         )
         self.loss_fn = loss_fn
 
@@ -396,7 +370,6 @@ class PrecipitationTrainer(Trainer):
         loss_dict = self.loss_fn(
             pred_reg=outputs['reg_output'],
             pred_cls=outputs['cls_output'],
-            pred_multi_cls=outputs.get('multi_cls_logits', None),
             target_grid=rain_target,
             station_obs=station_obs,
         )
